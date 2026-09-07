@@ -1,0 +1,704 @@
+Собрал всё в одну понятную схему: у нас будет **два обычных VBA-модуля + код в `ThisWorkbook`**. Первый модуль делает JSON snapshot, второй запускает его по `Application.OnTime`, а `ThisWorkbook` автоматически стартует и останавливает таймер.
+
+Для дашборда остаёмся в рамках локальной работы без дополнительного ПО и с модульной структурой. 
+
+### 1. Подготовь книгу
+
+Сохрани Excel-файл как:
+
+
+Excel Macro-Enabled Workbook (*.xlsm)
+'
+
+Открой редактор VBA:
+
+`text`
+Alt + F11
+```
+
+В проекте книги должны появиться:
+
+```text
+VBAProject
+│
+├── Microsoft Excel Objects
+│   └── ThisWorkbook
+│
+└── Modules
+    ├── modSnapshotExport
+    └── modSnapshotTimer
+```
+
+### 2. Добавь модуль экспорта
+
+В VBA:
+
+```text
+Insert → Module
+```
+
+Переименуй модуль, например, в:
+
+```text
+modSnapshotExport
+```
+
+Вставь туда код:
+
+
+Option Explicit
+
+' ============================================================
+' Modul eksporta snapshot dlya dashboard
+'
+' Eksport:
+'   - tolko stolbcy A i B;
+'   - tolko dannye za poslednie 24 chasa;
+'   - pustye A ili B ignoriruyutsya;
+'   - JSON sozdaetsya zanovo;
+'   - staryy fayl zamenyaetsya tolko posle uspeshnoy zapisi.
+' ============================================================
+
+
+Private Const EXPORT_SHEET_NAME As String = "Sheet1"
+
+Private Const EXPORT_FILE_PATH As String = _
+    "C:\dashboard\data\production.json"
+
+Private Const FIRST_DATA_ROW As Long = 2
+
+
+' ============================================================
+' Glavnaya procedura eksporta
+' ============================================================
+
+Public Sub ExportDashboardData()
+
+    Dim ws As Worksheet
+
+    Dim exportTime As Date
+    Dim cutoffTime As Date
+
+    Dim lastRow As Long
+    Dim firstExportRow As Long
+
+    Dim tempFilePath As String
+
+    On Error GoTo ExportError
+
+    Set ws = ThisWorkbook.Worksheets(EXPORT_SHEET_NAME)
+
+    ' Fiksiruem sistemnoe vremya odin raz.
+    exportTime = Now
+
+    ' Granica poslednih 24 chasov.
+    cutoffTime = exportTime - 1
+
+    ' Ischem poslednyuyu ispolzuemuyu stroku.
+    lastRow = GetLastUsedRow(ws)
+
+    If lastRow < FIRST_DATA_ROW Then
+        Exit Sub
+    End If
+
+    ' Ischem granicu snapshot snizu vverh.
+    firstExportRow = FindFirstExportRow( _
+        ws:=ws, _
+        lastRow:=lastRow, _
+        cutoffTime:=cutoffTime _
+    )
+
+    tempFilePath = EXPORT_FILE_PATH & ".tmp"
+
+    ' Snachala polnostyu sozdaem vremennyy JSON.
+    WriteJsonFile _
+        ws:=ws, _
+        firstRow:=firstExportRow, _
+        lastRow:=lastRow, _
+        exportTime:=exportTime, _
+        filePath:=tempFilePath
+
+    ' Tolko posle uspeshnoy zapisi zamenyaem rabochiy fayl.
+    ReplaceFile _
+        tempFilePath:=tempFilePath, _
+        finalFilePath:=EXPORT_FILE_PATH
+
+    Exit Sub
+
+
+ExportError:
+
+    ' Operatoru MsgBox ne pokazyvaem.
+
+    On Error Resume Next
+
+    If Len(tempFilePath) > 0 Then
+        If Len(Dir$(tempFilePath)) > 0 Then
+            Kill tempFilePath
+        End If
+    End If
+
+    On Error GoTo 0
+
+End Sub
+
+
+' ============================================================
+' Poisk posledney ispolzuemoy stroki
+'
+' Ischem po vsemu listu, a ne tolko po A,
+' potomu chto v A mogut byt pustye yacheyki.
+' ============================================================
+
+Private Function GetLastUsedRow(ByVal ws As Worksheet) As Long
+
+    Dim lastCell As Range
+
+    Set lastCell = ws.Cells.Find( _
+        What:="*", _
+        After:=ws.Cells(1, 1), _
+        LookAt:=xlPart, _
+        LookIn:=xlFormulas, _
+        SearchOrder:=xlByRows, _
+        SearchDirection:=xlPrevious, _
+        MatchCase:=False _
+    )
+
+    If lastCell Is Nothing Then
+        GetLastUsedRow = 0
+    Else
+        GetLastUsedRow = lastCell.Row
+    End If
+
+End Function
+
+
+' ============================================================
+' Poisk granicy poslednih 24 chasov
+'
+' Idem snizu vverh.
+'
+' Pustye A ili B ignoriruyutsya.
+'
+' Kak tolko naydena validnaya stroka:
+'
+'     A < cutoffTime
+'
+' ostanavlivaemsya.
+' ============================================================
+
+Private Function FindFirstExportRow( _
+    ByVal ws As Worksheet, _
+    ByVal lastRow As Long, _
+    ByVal cutoffTime As Date _
+) As Long
+
+    Dim i As Long
+    Dim valueA As Variant
+    Dim valueB As Variant
+
+    FindFirstExportRow = FIRST_DATA_ROW
+
+    For i = lastRow To FIRST_DATA_ROW Step -1
+
+        valueA = ws.Cells(i, "A").Value
+        valueB = ws.Cells(i, "B").Value2
+
+        If Len(Trim$(CStr(valueA))) > 0 _
+           And Len(Trim$(CStr(valueB))) > 0 Then
+
+            If IsDate(valueA) Then
+
+                If CDate(valueA) < cutoffTime Then
+
+                    FindFirstExportRow = i + 1
+                    Exit Function
+
+                End If
+
+            End If
+
+        End If
+
+    Next i
+
+End Function
+
+
+' ============================================================
+' Sozdanie JSON
+'
+' Format:
+'
+' {
+'   "generatedAt": "2026-09-07T21:50:00",
+'   "rows": [
+'     ["2026-09-07T20:01:11", "ABC123"],
+'     ["2026-09-07T20:02:25", "ABC124"]
+'   ]
+' }
+' ============================================================
+
+Private Sub WriteJsonFile( _
+    ByVal ws As Worksheet, _
+    ByVal firstRow As Long, _
+    ByVal lastRow As Long, _
+    ByVal exportTime As Date, _
+    ByVal filePath As String _
+)
+
+    Dim data As Variant
+    Dim fileNumber As Integer
+
+    Dim r As Long
+    Dim rowJson As String
+    Dim isFirstOutputRow As Boolean
+
+    If firstRow > lastRow Then
+        firstRow = lastRow
+    End If
+
+    ' Chitaem tolko A:B odnim blokom v pamyat.
+    data = ws.Range( _
+        ws.Cells(firstRow, "A"), _
+        ws.Cells(lastRow, "B") _
+    ).Value
+
+    fileNumber = FreeFile
+
+    Open filePath For Output As #fileNumber
+
+    Print #fileNumber, "{"
+
+    Print #fileNumber, _
+        "  ""generatedAt"": """ & _
+        Format$(exportTime, "yyyy-mm-dd\THH:nn:ss") & _
+        ""","
+
+    Print #fileNumber, "  ""rows"": ["
+
+    isFirstOutputRow = True
+
+    For r = 1 To UBound(data, 1)
+
+        If Len(Trim$(CStr(data(r, 1)))) > 0 _
+           And Len(Trim$(CStr(data(r, 2)))) > 0 Then
+
+            If IsDate(data(r, 1)) Then
+
+                rowJson = _
+                    "    [""" & _
+                    Format$(CDate(data(r, 1)), "yyyy-mm-dd\THH:nn:ss") & _
+                    """,""" & _
+                    EscapeJsonString(CStr(data(r, 2))) & _
+                    """]"
+
+                If Not isFirstOutputRow Then
+                    Print #fileNumber, ","
+                End If
+
+                Print #fileNumber, rowJson;
+
+                isFirstOutputRow = False
+
+            End If
+
+        End If
+
+    Next r
+
+    Print #fileNumber, ""
+    Print #fileNumber, "  ]"
+    Print #fileNumber, "}"
+
+    Close #fileNumber
+
+End Sub
+
+
+' ============================================================
+' Ekranirovanie teksta dlya JSON
+' ============================================================
+
+Private Function EscapeJsonString(ByVal text As String) As String
+
+    text = Replace$(text, "\", "\\")
+    text = Replace$(text, """", "\""")
+    text = Replace$(text, vbCrLf, "\n")
+    text = Replace$(text, vbCr, "\n")
+    text = Replace$(text, vbLf, "\n")
+    text = Replace$(text, vbTab, "\t")
+
+    EscapeJsonString = text
+
+End Function
+
+
+' ============================================================
+' Bezopasnaya zamena fayla
+' ============================================================
+
+Private Sub ReplaceFile( _
+    ByVal tempFilePath As String, _
+    ByVal finalFilePath As String _
+)
+
+    If Len(Dir$(finalFilePath)) > 0 Then
+        Kill finalFilePath
+    End If
+
+    Name tempFilePath As finalFilePath
+
+End Sub
+```
+
+Вверху этого модуля обязательно измени:
+
+```vb
+Private Const EXPORT_SHEET_NAME As String = "Sheet1"
+```
+
+на реальное имя листа, например:
+
+```vb
+Private Const EXPORT_SHEET_NAME As String = "ScanLog"
+```
+
+И укажи реальный путь:
+
+```vb
+Private Const EXPORT_FILE_PATH As String = _
+    "C:\dashboard\data\production.json"
+```
+
+Папка `data` должна уже существовать. Сам модуль папки не создаёт.
+
+### 3. Добавь модуль таймера
+
+Снова:
+
+```text
+Insert → Module
+```
+
+Назови его:
+
+```text
+modSnapshotTimer
+```
+
+Вставь:
+
+```vb
+Option Explicit
+
+' ============================================================
+' OnTime timer dlya snapshot
+'
+' Snapshot sozdaetsya:
+'   - srazu pri starte;
+'   - zatem po rovnoy 5-minutnoy setke.
+'
+' Primer:
+'   09:30
+'   09:35
+'   09:40
+' ============================================================
+
+Private Const SNAPSHOT_INTERVAL_MINUTES As Long = 5
+
+Private NextSnapshotTime As Date
+Private TimerIsRunning As Boolean
+
+
+' ============================================================
+' Zapusk taymera
+' ============================================================
+
+Public Sub StartSnapshotTimer()
+
+    If TimerIsRunning Then
+        Exit Sub
+    End If
+
+    TimerIsRunning = True
+
+    ' Snapshot srazu posle starta.
+    ExportDashboardData
+
+    ' Planiruem sleduyuschiy.
+    ScheduleNextSnapshot
+
+End Sub
+
+
+' ============================================================
+' Vyzyvaetsya Application.OnTime
+' ============================================================
+
+Public Sub SnapshotTimerTick()
+
+    If Not TimerIsRunning Then
+        Exit Sub
+    End If
+
+    ExportDashboardData
+
+    ScheduleNextSnapshot
+
+End Sub
+
+
+' ============================================================
+' Raschet sleduyuschey rovnoy 5-minutnoy otmetki
+' ============================================================
+
+Private Sub ScheduleNextSnapshot()
+
+    Dim currentTime As Date
+    Dim baseTime As Date
+    Dim nextMinute As Long
+
+    If Not TimerIsRunning Then
+        Exit Sub
+    End If
+
+    currentTime = Now
+
+    nextMinute = _
+        ((Minute(currentTime) \ SNAPSHOT_INTERVAL_MINUTES) + 1) _
+        * SNAPSHOT_INTERVAL_MINUTES
+
+    baseTime = DateSerial( _
+        Year(currentTime), _
+        Month(currentTime), _
+        Day(currentTime) _
+    )
+
+    If nextMinute >= 60 Then
+
+        NextSnapshotTime = _
+            baseTime + _
+            TimeSerial(Hour(currentTime) + 1, 0, 0)
+
+    Else
+
+        NextSnapshotTime = _
+            baseTime + _
+            TimeSerial(Hour(currentTime), nextMinute, 0)
+
+    End If
+
+    Application.OnTime _
+        EarliestTime:=NextSnapshotTime, _
+        Procedure:="SnapshotTimerTick", _
+        Schedule:=True
+
+End Sub
+
+
+' ============================================================
+' Ostanovka taymera
+'
+' Otmenyaem uzhe zaplanirovannyy OnTime.
+' ============================================================
+
+Public Sub StopSnapshotTimer()
+
+    On Error Resume Next
+
+    TimerIsRunning = False
+
+    If NextSnapshotTime <> 0 Then
+
+        Application.OnTime _
+            EarliestTime:=NextSnapshotTime, _
+            Procedure:="SnapshotTimerTick", _
+            Schedule:=False
+
+    End If
+
+    NextSnapshotTime = 0
+
+    On Error GoTo 0
+
+End Sub
+```
+
+### 4. Добавь автоматический запуск в `ThisWorkbook`
+
+В левой панели VBA дважды нажми:
+
+```text
+Microsoft Excel Objects
+    ↓
+ThisWorkbook
+```
+
+Вставь:
+
+```vb
+Option Explicit
+
+' ============================================================
+' Avtomaticheskiy zapusk taymera pri otkrytii knigi
+' ============================================================
+
+Private Sub Workbook_Open()
+
+    On Error Resume Next
+
+    StartSnapshotTimer
+
+    On Error GoTo 0
+
+End Sub
+
+
+' ============================================================
+' Ostanovka taymera pered zakrytiem knigi
+' ============================================================
+
+Private Sub Workbook_BeforeClose(Cancel As Boolean)
+
+    On Error Resume Next
+
+    StopSnapshotTimer
+
+    On Error GoTo 0
+
+End Sub
+```
+
+### 5. Проверь вручную до автоматизации
+
+Сначала лучше убедиться, что сам экспорт работает.
+
+В Excel нажми:
+
+```text
+Alt + F8
+```
+
+Запусти:
+
+```text
+ExportDashboardData
+```
+
+После этого должен появиться:
+
+```text
+C:\dashboard\data\production.json
+```
+
+Открой его обычным Блокнотом. Пример содержимого:
+
+```json
+{
+  "generatedAt": "2026-09-07T21:50:00",
+  "rows": [
+    ["2026-09-06T22:01:13", "ABC123"],
+    ["2026-09-07T08:14:27", "ABC124"]
+  ]
+}
+```
+
+Если JSON не появился, сначала проверяй имя листа и путь.
+
+### 6. Проверь таймер
+
+Через `Alt + F8` запусти:
+
+```text
+StartSnapshotTimer
+```
+
+JSON должен обновиться **сразу**.
+
+После этого смотри время изменения файла. Например, если запуск произошёл в:
+
+```text
+21:52
+```
+
+дальше файл должен обновиться:
+
+```text
+21:55
+22:00
+22:05
+...
+```
+
+Оператор при этом ничего видеть не должен.
+
+### 7. Проверь автоматическое открытие
+
+Закрой книгу. При закрытии выполнится:
+
+```text
+Workbook_BeforeClose
+    ↓
+StopSnapshotTimer
+```
+
+Затем снова открой книгу.
+
+Если появилась жёлтая полоса безопасности, нажми **«Включить содержимое»**. Если `Workbook_Open` уже был пропущен из-за первоначально заблокированных макросов, для первой проверки лучше после разрешения макросов закрыть и снова открыть книгу.
+
+После нормального открытия:
+
+```text
+Workbook_Open
+    ↓
+StartSnapshotTimer
+    ↓
+ExportDashboardData
+```
+
+Поэтому JSON должен обновиться практически сразу после открытия книги.
+
+### Что в итоге происходит
+
+```text
+Excel открыт
+     ↓
+Workbook_Open
+     ↓
+StartSnapshotTimer
+     ↓
+ExportDashboardData
+     ↓
+фиксируется Now
+     ↓
+ищется последняя используемая строка
+     ↓
+поиск снизу вверх
+     ↓
+до первой валидной A < Now - 1
+     ↓
+пустые A/B игнорируются
+     ↓
+A:B читаются в память
+     ↓
+production.json.tmp
+     ↓
+запись завершена успешно
+     ↓
+production.json заменяется
+     ↓
+следующий запуск 5-минутной сетки
+```
+
+Например:
+
+```text
+21:52  книга открыта → snapshot
+21:55  snapshot
+22:00  snapshot
+22:05  snapshot
+22:10  snapshot
+```
+
+Таким образом `production.json` — не журнал действий оператора, а **регулярный актуальный снимок Excel за последние 24 часа**. Это и решает исходную проблему с ошибочными промежуточными записями append-log.
