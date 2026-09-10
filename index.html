@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="cs">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Dashboard</title>
+    <link rel="stylesheet" href="css/dashboard.css">
+</head>
+<body>
+    <main id="dashboard" class="dashboard">
+        <header
+            id="worktime-filter"
+            class="dashboard-toolbar"
+        ></header>
+        <aside
+            id="settings-panel"
+            class="settings-panel"
+            hidden
+        >
+            <section
+                id="settings-font"
+                class="settings-panel__section"
+            ></section>
+            <section class="settings-panel__section">
+                <div id="settings-sources"></div>
+            </section>
+            <section
+                id="settings-schedule"
+                class="settings-panel__section"
+            ></section>
+            <section
+                id="source-status"
+                class="source-list"
+                aria-live="polite"
+            ></section>
+        </aside>
+        <section
+            id="hour-count-widgets"
+            class="hour-count-grid"
+        ></section>
+    </main>
+
+    <script src="js/core/dictionary.js" defer></script>
+    <script src="js/core/storage.js" defer></script>
+    <script src="js/core/worktime.js" defer></script>
+    <script src="js/core/hour-count.js" defer></script>
+    <script src="js/sources/js-source.js" defer></script>
+    <script src="js/sources/ics-source.js" defer></script>
+    <script src="js/widgets/worktime-filter.js" defer></script>
+    <script src="js/widgets/settings-panel.js" defer></script>
+    <script src="js/widgets/hour-count-widget.js" defer></script>
+    <script src="js/widgets/source-card.js" defer></script>
+    <script src="js/app.js" defer></script>
+</body>
+</html>
